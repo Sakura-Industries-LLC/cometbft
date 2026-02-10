@@ -134,6 +134,19 @@ func MultiplexTransportMaxIncomingConnections(n int) MultiplexTransportOption {
 	return func(mt *MultiplexTransport) { mt.maxIncomingConnections = n }
 }
 
+// UpgradeFunc replaces the default STS handshake with a custom authenticated
+// connection upgrade. dialedAddr is nil for inbound connections.
+// The returned conn.AuthenticatedConn must implement net.Conn and provide
+// the remote peer's public key via RemotePubKey().
+type UpgradeFunc func(c net.Conn, timeout time.Duration, privKey crypto.PrivKey,
+	dialedAddr *NetAddress) (conn.AuthenticatedConn, error)
+
+// MultiplexTransportUpgradeFunc sets a custom connection upgrade function,
+// replacing the default STS (Station-to-Station) handshake.
+func MultiplexTransportUpgradeFunc(fn UpgradeFunc) MultiplexTransportOption {
+	return func(mt *MultiplexTransport) { mt.upgradeFunc = fn }
+}
+
 // MultiplexTransport accepts and dials tcp connections and upgrades them to
 // multiplexed peers.
 type MultiplexTransport struct {
@@ -159,6 +172,9 @@ type MultiplexTransport struct {
 	// peer currently. All relevant configuration should be refactored into options
 	// with sane defaults.
 	mConfig conn.MConnConfig
+
+	// upgradeFunc, when set, replaces the default STS handshake in upgrade().
+	upgradeFunc UpgradeFunc
 }
 
 // Test multiplexTransport for interface completeness.
@@ -183,6 +199,12 @@ func NewMultiplexTransport(
 		conns:            NewConnSet(),
 		resolver:         net.DefaultResolver,
 	}
+}
+
+// SetUpgradeFunc sets a custom connection upgrade function, replacing the
+// default STS handshake. Must be called before Listen/Dial (i.e. before Start).
+func (mt *MultiplexTransport) SetUpgradeFunc(fn UpgradeFunc) {
+	mt.upgradeFunc = fn
 }
 
 // NetAddress implements Transport.
@@ -228,14 +250,14 @@ func (mt *MultiplexTransport) Dial(
 		return nil, err
 	}
 
-	secretConn, nodeInfo, err := mt.upgrade(c, &addr)
+	authConn, nodeInfo, err := mt.upgrade(c, &addr)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg.outbound = true
 
-	p := mt.wrapPeer(secretConn, nodeInfo, cfg, &addr)
+	p := mt.wrapPeer(authConn, nodeInfo, cfg, &addr)
 
 	return p, nil
 }
@@ -325,23 +347,23 @@ func (mt *MultiplexTransport) acceptPeers() {
 			}()
 
 			var (
-				nodeInfo   NodeInfo
-				secretConn *conn.SecretConnection
-				netAddr    *NetAddress
+				nodeInfo NodeInfo
+				authConn conn.AuthenticatedConn
+				netAddr  *NetAddress
 			)
 
 			err := mt.filterConn(c)
 			if err == nil {
-				secretConn, nodeInfo, err = mt.upgrade(c, nil)
+				authConn, nodeInfo, err = mt.upgrade(c, nil)
 				if err == nil {
 					addr := c.RemoteAddr()
-					id := PubKeyToID(secretConn.RemotePubKey())
+					id := PubKeyToID(authConn.RemotePubKey())
 					netAddr = NewNetAddress(id, addr)
 				}
 			}
 
 			select {
-			case mt.acceptc <- accept{netAddr, secretConn, nodeInfo, err}:
+			case mt.acceptc <- accept{netAddr, authConn, nodeInfo, err}:
 				// Make the upgraded peer available.
 			case <-mt.closec:
 				// Give up if the transport was closed.
@@ -411,24 +433,28 @@ func (mt *MultiplexTransport) filterConn(c net.Conn) (err error) {
 func (mt *MultiplexTransport) upgrade(
 	c net.Conn,
 	dialedAddr *NetAddress,
-) (secretConn *conn.SecretConnection, nodeInfo NodeInfo, err error) {
+) (authConn conn.AuthenticatedConn, nodeInfo NodeInfo, err error) {
 	defer func() {
 		if err != nil {
 			_ = mt.cleanup(c)
 		}
 	}()
 
-	secretConn, err = upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
+	if mt.upgradeFunc != nil {
+		authConn, err = mt.upgradeFunc(c, mt.handshakeTimeout, mt.nodeKey.PrivKey, dialedAddr)
+	} else {
+		authConn, err = upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
+	}
 	if err != nil {
 		return nil, nil, ErrRejected{
 			conn:          c,
-			err:           fmt.Errorf("secret conn failed: %v", err),
+			err:           fmt.Errorf("conn upgrade failed: %v", err),
 			isAuthFailure: true,
 		}
 	}
 
 	// For outgoing conns, ensure connection key matches dialed key.
-	connID := PubKeyToID(secretConn.RemotePubKey())
+	connID := PubKeyToID(authConn.RemotePubKey())
 	if dialedAddr != nil {
 		if dialedID := dialedAddr.ID; connID != dialedID {
 			return nil, nil, ErrRejected{
@@ -444,7 +470,7 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
-	nodeInfo, err = handshake(secretConn, mt.handshakeTimeout, mt.nodeInfo)
+	nodeInfo, err = handshake(authConn, mt.handshakeTimeout, mt.nodeInfo)
 	if err != nil {
 		return nil, nil, ErrRejected{
 			conn:          c,
@@ -494,7 +520,7 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
-	return secretConn, nodeInfo, nil
+	return authConn, nodeInfo, nil
 }
 
 func (mt *MultiplexTransport) wrapPeer(

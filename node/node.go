@@ -87,6 +87,23 @@ type Node struct {
 // Option sets a parameter for the node.
 type Option func(*Node)
 
+// Transport returns the underlying MultiplexTransport.
+// Use this to configure the transport (e.g. SetUpgradeFunc) after node
+// creation but before Start().
+func (n *Node) Transport() *p2p.MultiplexTransport {
+	return n.transport
+}
+
+// WithUpgradeFunc returns a NodeOption that replaces the default STS handshake
+// with a custom authenticated connection upgrade. The option is applied after
+// node construction (transport exists) but before Start() (transport is not yet
+// listening), so the timing is safe.
+func WithUpgradeFunc(fn p2p.UpgradeFunc) Option {
+	return func(n *Node) {
+		n.transport.SetUpgradeFunc(fn)
+	}
+}
+
 // CustomReactors allows you to add custom reactors (name -> p2p.Reactor) to
 // the node's Switch.
 //
