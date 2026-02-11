@@ -110,32 +110,16 @@ func startRPCServers(ctx context.Context, cfg *config.RPCConfig, logger log.Logg
 			Handler: rh,
 			Addr:    listenerAddr,
 		}
-		if cfg.IsTLSEnabled() {
-			keyFile := cfg.KeyFile()
-			certFile := cfg.CertFile()
-			listenerAddr := listenerAddr
-			g.Go(func() error {
-				logger.Info("RPC HTTPS server starting", "address", listenerAddr,
-					"certfile", certFile, "keyfile", keyFile)
-				err := server.ListenAndServeTLS(tctx, certFile, keyFile)
-				if !errors.Is(err, net.ErrClosed) {
-					return err
-				}
-				logger.Info("RPC HTTPS server stopped", "address", listenerAddr)
-				return nil
-			})
-		} else {
-			listenerAddr := listenerAddr
-			g.Go(func() error {
-				logger.Info("RPC HTTP server starting", "address", listenerAddr)
-				err := server.ListenAndServe(tctx)
-				if !errors.Is(err, net.ErrClosed) {
-					return err
-				}
-				logger.Info("RPC HTTP server stopped", "address", listenerAddr)
-				return nil
-			})
-		}
+		listenerAddr := listenerAddr
+		g.Go(func() error {
+			logger.Info("RPC HTTP server starting", "address", listenerAddr)
+			err := server.ListenAndServe(tctx)
+			if !errors.Is(err, net.ErrClosed) {
+				return err
+			}
+			logger.Info("RPC HTTP server stopped", "address", listenerAddr)
+			return nil
+		})
 	}
 	return g.Wait()
 }

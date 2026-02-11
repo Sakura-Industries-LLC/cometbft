@@ -1,11 +1,9 @@
 package server
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -68,42 +66,6 @@ func TestMaxOpenConnections(t *testing.T) {
 	if int(failed) >= attempts/2 {
 		t.Errorf("%d requests failed within %d attempts", failed, attempts)
 	}
-}
-
-func TestServeTLS(t *testing.T) {
-	ln, err := net.Listen("tcp", "localhost:0")
-	require.NoError(t, err)
-	defer ln.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "some body")
-	})
-
-	chErr := make(chan error, 1)
-	go func() {
-		// FIXME This goroutine leaks
-		chErr <- ServeTLS(ln, mux, "test.crt", "test.key", log.TestingLogger(), DefaultConfig())
-	}()
-
-	select {
-	case err := <-chErr:
-		require.NoError(t, err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	c := &http.Client{Transport: tr}
-	res, err := c.Get("https://" + ln.Addr().String())
-	require.NoError(t, err)
-	defer res.Body.Close()
-	assert.Equal(t, http.StatusOK, res.StatusCode)
-
-	body, err := io.ReadAll(res.Body)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("some body"), body)
 }
 
 func TestWriteRPCResponseHTTP(t *testing.T) {

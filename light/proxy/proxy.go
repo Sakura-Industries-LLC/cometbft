@@ -64,26 +64,6 @@ func (p *Proxy) ListenAndServe() error {
 	)
 }
 
-// ListenAndServeTLS acts identically to ListenAndServe, except that it expects
-// HTTPS connections.
-// See http#Server#ListenAndServeTLS.
-func (p *Proxy) ListenAndServeTLS(certFile, keyFile string) error {
-	listener, mux, err := p.listen()
-	if err != nil {
-		return err
-	}
-	p.Listener = listener
-
-	return rpcserver.ServeTLS(
-		listener,
-		mux,
-		certFile,
-		keyFile,
-		p.Logger,
-		p.Config,
-	)
-}
-
 func (p *Proxy) listen() (net.Listener, *http.ServeMux, error) {
 	mux := http.NewServeMux()
 

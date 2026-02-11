@@ -402,24 +402,6 @@ type RPCConfig struct {
 	// Maximum size of request header, in bytes
 	MaxHeaderBytes int `mapstructure:"max_header_bytes"`
 
-	// The path to a file containing certificate that is used to create the HTTPS server.
-	// Might be either absolute path or path related to CometBFT's config directory.
-	//
-	// If the certificate is signed by a certificate authority,
-	// the certFile should be the concatenation of the server's certificate, any intermediates,
-	// and the CA's certificate.
-	//
-	// NOTE: both tls_cert_file and tls_key_file must be present for CometBFT to create HTTPS server.
-	// Otherwise, HTTP server is run.
-	TLSCertFile string `mapstructure:"tls_cert_file"`
-
-	// The path to a file containing matching private key that is used to create the HTTPS server.
-	// Might be either absolute path or path related to CometBFT's config directory.
-	//
-	// NOTE: both tls_cert_file and tls_key_file must be present for CometBFT to create HTTPS server.
-	// Otherwise, HTTP server is run.
-	TLSKeyFile string `mapstructure:"tls_key_file"`
-
 	// pprof listen address (https://golang.org/pkg/net/http/pprof)
 	// FIXME: This should be moved under the instrumentation section
 	PprofListenAddress string `mapstructure:"pprof_laddr"`
@@ -448,8 +430,6 @@ func DefaultRPCConfig() *RPCConfig {
 		MaxBodyBytes:        int64(1000000), // 1MB
 		MaxHeaderBytes:      1 << 20,        // same as the net/http default
 
-		TLSCertFile: "",
-		TLSKeyFile:  "",
 	}
 }
 
@@ -511,26 +491,6 @@ func (cfg *RPCConfig) IsCorsEnabled() bool {
 
 func (cfg *RPCConfig) IsPprofEnabled() bool {
 	return len(cfg.PprofListenAddress) != 0
-}
-
-func (cfg RPCConfig) KeyFile() string {
-	path := cfg.TLSKeyFile
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return rootify(filepath.Join(DefaultConfigDir, path), cfg.RootDir)
-}
-
-func (cfg RPCConfig) CertFile() string {
-	path := cfg.TLSCertFile
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return rootify(filepath.Join(DefaultConfigDir, path), cfg.RootDir)
-}
-
-func (cfg RPCConfig) IsTLSEnabled() bool {
-	return cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
 }
 
 //-----------------------------------------------------------------------------

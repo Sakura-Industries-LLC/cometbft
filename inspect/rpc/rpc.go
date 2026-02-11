@@ -100,20 +100,6 @@ func (srv *Server) ListenAndServe(ctx context.Context) error {
 	return server.Serve(listener, srv.Handler, srv.Logger, serverRPCConfig(srv.Config))
 }
 
-// ListenAndServeTLS listens on the address specified in srv.Addr. ListenAndServeTLS handles
-// incoming requests over HTTPS using the Inspector rpc handler specified on the server.
-func (srv *Server) ListenAndServeTLS(ctx context.Context, certFile, keyFile string) error {
-	listener, err := server.Listen(srv.Addr, srv.Config.MaxOpenConnections)
-	if err != nil {
-		return err
-	}
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
-	return server.ServeTLS(listener, srv.Handler, certFile, keyFile, srv.Logger, serverRPCConfig(srv.Config))
-}
-
 func serverRPCConfig(r *config.RPCConfig) *server.Config {
 	cfg := server.DefaultConfig()
 	cfg.MaxBodyBytes = r.MaxBodyBytes

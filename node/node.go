@@ -109,7 +109,6 @@ func WithUpgradeFunc(fn p2p.UpgradeFunc) Option {
 // WithRPCTLSConfig returns a NodeOption that configures mutual TLS for the
 // JSON-RPC and gRPC listeners. When set, listeners are wrapped with
 // tls.NewListener using this config, enforcing client certificate verification.
-// This takes precedence over file-based TLS (IsTLSEnabled).
 func WithRPCTLSConfig(c *stdtls.Config) Option {
 	return func(n *Node) {
 		n.rpcTLSConfig = c
@@ -781,41 +780,17 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 		if n.rpcTLSConfig != nil {
 			listener = stdtls.NewListener(listener, n.rpcTLSConfig)
 			rpcLogger.Info("RPC listener using DNTLS mTLS", "addr", listenAddr)
-			go func() {
-				if err := rpcserver.Serve(
-					listener,
-					rootHandler,
-					rpcLogger,
-					config,
-				); err != nil {
-					n.Logger.Error("Error serving RPC with DNTLS mTLS", "err", err)
-				}
-			}()
-		} else if n.config.RPC.IsTLSEnabled() {
-			go func() {
-				if err := rpcserver.ServeTLS(
-					listener,
-					rootHandler,
-					n.config.RPC.CertFile(),
-					n.config.RPC.KeyFile(),
-					rpcLogger,
-					config,
-				); err != nil {
-					n.Logger.Error("Error serving server with TLS", "err", err)
-				}
-			}()
-		} else {
-			go func() {
-				if err := rpcserver.Serve(
-					listener,
-					rootHandler,
-					rpcLogger,
-					config,
-				); err != nil {
-					n.Logger.Error("Error serving server", "err", err)
-				}
-			}()
 		}
+		go func() {
+			if err := rpcserver.Serve(
+				listener,
+				rootHandler,
+				rpcLogger,
+				config,
+			); err != nil {
+				n.Logger.Error("Error serving RPC", "err", err)
+			}
+		}()
 
 		listeners[i] = listener
 	}
