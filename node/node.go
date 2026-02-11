@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	stdtls "crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -82,6 +83,7 @@ type Node struct {
 	indexerService    *txindex.IndexerService
 	prometheusSrv     *http.Server
 	pprofSrv          *http.Server
+	rpcTLSConfig      *stdtls.Config // DNTLS mTLS config for RPC/gRPC; nil = no mTLS
 }
 
 // Option sets a parameter for the node.
@@ -101,6 +103,16 @@ func (n *Node) Transport() *p2p.MultiplexTransport {
 func WithUpgradeFunc(fn p2p.UpgradeFunc) Option {
 	return func(n *Node) {
 		n.transport.SetUpgradeFunc(fn)
+	}
+}
+
+// WithRPCTLSConfig returns a NodeOption that configures mutual TLS for the
+// JSON-RPC and gRPC listeners. When set, listeners are wrapped with
+// tls.NewListener using this config, enforcing client certificate verification.
+// This takes precedence over file-based TLS (IsTLSEnabled).
+func WithRPCTLSConfig(c *stdtls.Config) Option {
+	return func(n *Node) {
+		n.rpcTLSConfig = c
 	}
 }
 
@@ -766,7 +778,20 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 			})
 			rootHandler = corsMiddleware.Handler(mux)
 		}
-		if n.config.RPC.IsTLSEnabled() {
+		if n.rpcTLSConfig != nil {
+			listener = stdtls.NewListener(listener, n.rpcTLSConfig)
+			rpcLogger.Info("RPC listener using DNTLS mTLS", "addr", listenAddr)
+			go func() {
+				if err := rpcserver.Serve(
+					listener,
+					rootHandler,
+					rpcLogger,
+					config,
+				); err != nil {
+					n.Logger.Error("Error serving RPC with DNTLS mTLS", "err", err)
+				}
+			}()
+		} else if n.config.RPC.IsTLSEnabled() {
 			go func() {
 				if err := rpcserver.ServeTLS(
 					listener,
@@ -812,6 +837,10 @@ func (n *Node) startRPC() ([]net.Listener, error) {
 		listener, err := rpcserver.Listen(grpcListenAddr, config.MaxOpenConnections)
 		if err != nil {
 			return nil, err
+		}
+		if n.rpcTLSConfig != nil {
+			listener = stdtls.NewListener(listener, n.rpcTLSConfig)
+			n.Logger.Info("gRPC listener using DNTLS mTLS", "addr", grpcListenAddr)
 		}
 		go func() {
 			//nolint:staticcheck // SA1019: core_grpc.StartGRPCClient is deprecated: A new gRPC API will be introduced after v0.38.
