@@ -77,6 +77,51 @@ func TestNodeStartStop(t *testing.T) {
 	}
 }
 
+// TestNodeStartFailureStopsConstructedServices proves Start cleans up services
+// that NewNode started before a listener failure.
+func TestNodeStartFailureStopsConstructedServices(t *testing.T) {
+	config := newNodeTestConfig(t, "node_start_failure_cleanup_test")
+	defer os.RemoveAll(config.RootDir)
+
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer blocker.Close()
+	config.P2P.ListenAddress = "tcp://" + blocker.Addr().String()
+
+	n, err := DefaultNewNode(config, log.TestingLogger())
+	require.NoError(t, err)
+	require.True(t, n.EventBus().IsRunning())
+	require.True(t, n.proxyApp.IsRunning())
+	require.NotNil(t, n.indexerService)
+	require.True(t, n.indexerService.IsRunning())
+
+	err = n.Start()
+
+	require.Error(t, err)
+	assert.False(t, n.EventBus().IsRunning())
+	assert.False(t, n.proxyApp.IsRunning())
+	assert.False(t, n.indexerService.IsRunning())
+	require.NoError(t, n.Close())
+	require.NoError(t, n.Close())
+}
+
+// TestNodeCloseBeforeStart proves Close releases services started during
+// construction even when Start was never called.
+func TestNodeCloseBeforeStart(t *testing.T) {
+	config := newNodeTestConfig(t, "node_close_before_start_test")
+	defer os.RemoveAll(config.RootDir)
+
+	n, err := DefaultNewNode(config, log.TestingLogger())
+	require.NoError(t, err)
+	require.True(t, n.EventBus().IsRunning())
+	require.True(t, n.proxyApp.IsRunning())
+
+	require.NoError(t, n.Close())
+	require.NoError(t, n.Close())
+	assert.False(t, n.EventBus().IsRunning())
+	assert.False(t, n.proxyApp.IsRunning())
+}
+
 func TestSplitAndTrimEmpty(t *testing.T) {
 	testCases := []struct {
 		s        string

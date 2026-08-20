@@ -180,55 +180,69 @@ func GenFilePV(keyFilePath, stateFilePath string) *FilePV {
 	return NewFilePV(ed25519.GenPrivKey(), keyFilePath, stateFilePath)
 }
 
-// LoadFilePV loads a FilePV from the filePaths.  The FilePV handles double
-// signing prevention by persisting data to the stateFilePath.  If either file path
-// does not exist, the program will exit.
+// LoadFilePV loads a FilePV from the file paths. The FilePV prevents double
+// signing by persisting data to stateFilePath. The program exits if either
+// file cannot be loaded.
 func LoadFilePV(keyFilePath, stateFilePath string) *FilePV {
 	return loadFilePV(keyFilePath, stateFilePath, true)
 }
 
-// LoadFilePVEmptyState loads a FilePV from the given keyFilePath, with an empty LastSignState.
-// If the keyFilePath does not exist, the program will exit.
+// LoadFilePVWithError loads a FilePV from the file paths without terminating
+// the process when a file is missing or invalid.
+func LoadFilePVWithError(keyFilePath, stateFilePath string) (*FilePV, error) {
+	return loadFilePVWithError(keyFilePath, stateFilePath, true)
+}
+
+// LoadFilePVEmptyState loads a FilePV from keyFilePath with an empty
+// LastSignState. The program exits if the key file cannot be loaded.
 func LoadFilePVEmptyState(keyFilePath, stateFilePath string) *FilePV {
 	return loadFilePV(keyFilePath, stateFilePath, false)
 }
 
-// If loadState is true, we load from the stateFilePath. Otherwise, we use an empty LastSignState.
+// loadFilePV loads a FilePV or exits the process.
 func loadFilePV(keyFilePath, stateFilePath string, loadState bool) *FilePV {
-	keyJSONBytes, err := os.ReadFile(keyFilePath)
+	pv, err := loadFilePVWithError(keyFilePath, stateFilePath, loadState)
 	if err != nil {
 		cmtos.Exit(err.Error())
 	}
-	pvKey := FilePVKey{}
-	err = cmtjson.Unmarshal(keyJSONBytes, &pvKey)
+	return pv
+}
+
+// loadFilePVWithError loads a FilePV and returns file and decoding errors.
+func loadFilePVWithError(keyFilePath, stateFilePath string, loadState bool) (*FilePV, error) {
+	keyJSONBytes, err := os.ReadFile(keyFilePath)
 	if err != nil {
-		cmtos.Exit(fmt.Sprintf("Error reading PrivValidator key from %v: %v\n", keyFilePath, err))
+		return nil, fmt.Errorf("read private validator key %q: %w", keyFilePath, err)
+	}
+	pvKey := FilePVKey{}
+	if err := cmtjson.Unmarshal(keyJSONBytes, &pvKey); err != nil {
+		return nil, fmt.Errorf("decode private validator key %q: %w", keyFilePath, err)
+	}
+	if pvKey.PrivKey == nil {
+		return nil, fmt.Errorf("decode private validator key %q: private key is missing", keyFilePath)
 	}
 
-	// overwrite pubkey and address for convenience
+	// Overwrite the public key and address from the private key.
 	pvKey.PubKey = pvKey.PrivKey.PubKey()
 	pvKey.Address = pvKey.PubKey.Address()
 	pvKey.filePath = keyFilePath
 
 	pvState := FilePVLastSignState{}
-
 	if loadState {
 		stateJSONBytes, err := os.ReadFile(stateFilePath)
 		if err != nil {
-			cmtos.Exit(err.Error())
+			return nil, fmt.Errorf("read private validator state %q: %w", stateFilePath, err)
 		}
-		err = cmtjson.Unmarshal(stateJSONBytes, &pvState)
-		if err != nil {
-			cmtos.Exit(fmt.Sprintf("Error reading PrivValidator state from %v: %v\n", stateFilePath, err))
+		if err := cmtjson.Unmarshal(stateJSONBytes, &pvState); err != nil {
+			return nil, fmt.Errorf("decode private validator state %q: %w", stateFilePath, err)
 		}
 	}
-
 	pvState.filePath = stateFilePath
 
 	return &FilePV{
 		Key:           pvKey,
 		LastSignState: pvState,
-	}
+	}, nil
 }
 
 // LoadOrGenFilePV loads a FilePV from the given filePaths

@@ -32,6 +32,72 @@ func TestGenLoadValidator(t *testing.T) {
 	assert.Equal(t, height, privVal.LastSignState.Height, "expected privval.LastHeight to have been saved")
 }
 
+// TestLoadFilePVWithError loads a saved validator without terminating the
+// process.
+func TestLoadFilePVWithError(t *testing.T) {
+	privVal, keyFile, stateFile := newTestFilePV(t)
+	privVal.LastSignState.Height = 100
+	privVal.Save()
+
+	loaded, err := LoadFilePVWithError(keyFile, stateFile)
+
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, privVal.GetAddress(), loaded.GetAddress())
+	assert.Equal(t, privVal.LastSignState.Height, loaded.LastSignState.Height)
+}
+
+// TestLoadFilePVWithErrorRejectsInvalidFiles proves missing and malformed
+// validator files return errors instead of terminating the process.
+func TestLoadFilePVWithErrorRejectsInvalidFiles(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+	}{
+		{
+			name: "missing key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				require.NoError(t, os.Remove(keyFile))
+			},
+		},
+		{
+			name: "malformed key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(keyFile, []byte("{"), 0o600))
+			},
+		},
+		{
+			name: "missing state",
+			mutate: func(t *testing.T, _, stateFile string) {
+				t.Helper()
+				require.NoError(t, os.Remove(stateFile))
+			},
+		},
+		{
+			name: "malformed state",
+			mutate: func(t *testing.T, _, stateFile string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(stateFile, []byte("{"), 0o600))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			privVal, keyFile, stateFile := newTestFilePV(t)
+			privVal.Save()
+			tt.mutate(t, keyFile, stateFile)
+
+			loaded, err := LoadFilePVWithError(keyFile, stateFile)
+
+			require.Error(t, err)
+			assert.Nil(t, loaded)
+		})
+	}
+}
+
 func TestResetValidator(t *testing.T) {
 	privVal, _, tempStateFileName := newTestFilePV(t)
 	emptyState := FilePVLastSignState{filePath: tempStateFileName}
