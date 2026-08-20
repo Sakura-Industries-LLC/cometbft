@@ -373,8 +373,12 @@ func createCometTransportWithSwitch(
 	evidenceReactor *evidence.Reactor,
 	p2pMetrics *p2p.Metrics,
 	logger log.Logger,
-) (p2p.Transport, *p2p.Switch) {
-	transport, peerFilters := createCometTransport(config, nodeInfo, nodeKey, proxyApp)
+	authenticator p2p.ConnectionAuthenticator,
+) (p2p.Transport, *p2p.Switch, error) {
+	transport, peerFilters, err := createCometTransport(config, nodeInfo, nodeKey, proxyApp, authenticator)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	sw := createCometSwitch(
 		config,
@@ -391,7 +395,7 @@ func createCometTransportWithSwitch(
 		logger,
 	)
 
-	return transport, sw
+	return transport, sw, nil
 }
 
 func createCometTransport(
@@ -399,16 +403,27 @@ func createCometTransport(
 	nodeInfo p2p.NodeInfo,
 	nodeKey *p2p.NodeKey,
 	proxyApp proxy.AppConns,
+	authenticator p2p.ConnectionAuthenticator,
 ) (
 	*p2p.MultiplexTransport,
 	[]p2p.PeerFilterFunc,
+	error,
 ) {
+	mConnConfig := p2p.MConnConfig(config.P2P)
 	var (
-		mConnConfig = p2p.MConnConfig(config.P2P)
-		transport   = p2p.NewMultiplexTransport(nodeInfo, *nodeKey, mConnConfig)
+		transport   *p2p.MultiplexTransport
 		connFilters = []p2p.ConnFilterFunc{}
 		peerFilters = []p2p.PeerFilterFunc{}
 	)
+	if authenticator != nil {
+		var err error
+		transport, err = p2p.NewMultiplexTransportWithAuthenticator(nodeInfo, *nodeKey, mConnConfig, authenticator)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		transport = p2p.NewMultiplexTransport(nodeInfo, *nodeKey, mConnConfig)
+	}
 
 	if !config.P2P.AllowDuplicateIP {
 		connFilters = append(connFilters, p2p.ConnDuplicateIPFilter())
@@ -460,7 +475,7 @@ func createCometTransport(
 	max := config.P2P.MaxNumInboundPeers + len(splitAndTrimEmpty(config.P2P.UnconditionalPeerIDs, ",", " "))
 	p2p.MultiplexTransportMaxIncomingConnections(max)(transport)
 
-	return transport, peerFilters
+	return transport, peerFilters, nil
 }
 
 func createCometSwitch(

@@ -74,10 +74,9 @@ func newPeerConn(
 	}
 }
 
-// ID only exists for SecretConnection.
-// NOTE: Will panic if conn is not *SecretConnection.
+// ID returns the remote peer ID derived from the authenticated connection public key.
 func (pc peerConn) ID() ID {
-	return PubKeyToID(pc.conn.(*cmtconn.SecretConnection).RemotePubKey())
+	return PubKeyToID(pc.conn.(AuthenticatedConnection).RemotePubKey())
 }
 
 // Return the IP from the connection RemoteAddr

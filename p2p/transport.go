@@ -159,6 +159,9 @@ type MultiplexTransport struct {
 	// peer currently. All relevant configuration should be refactored into options
 	// with sane defaults.
 	mConfig conn.MConnConfig
+
+	// authenticator authenticates connections during upgrade. Nil selects stock STS.
+	authenticator ConnectionAuthenticator
 }
 
 // Test multiplexTransport for interface completeness.
@@ -173,6 +176,30 @@ func NewMultiplexTransport(
 	nodeKey NodeKey,
 	mConfig conn.MConnConfig,
 ) *MultiplexTransport {
+	return makeMultiplexTransport(nodeInfo, nodeKey, mConfig, nil)
+}
+
+// NewMultiplexTransportWithAuthenticator returns a multiplexed transport that
+// authenticates connections with authenticator instead of stock STS.
+func NewMultiplexTransportWithAuthenticator(
+	nodeInfo NodeInfo,
+	nodeKey NodeKey,
+	mConfig conn.MConnConfig,
+	authenticator ConnectionAuthenticator,
+) (*MultiplexTransport, error) {
+	if authenticator == nil {
+		return nil, ErrNilAuthenticator
+	}
+	return makeMultiplexTransport(nodeInfo, nodeKey, mConfig, authenticator), nil
+}
+
+// makeMultiplexTransport constructs a MultiplexTransport with an optional authenticator.
+func makeMultiplexTransport(
+	nodeInfo NodeInfo,
+	nodeKey NodeKey,
+	mConfig conn.MConnConfig,
+	authenticator ConnectionAuthenticator,
+) *MultiplexTransport {
 	return &MultiplexTransport{
 		acceptc:          make(chan accept),
 		closec:           make(chan struct{}),
@@ -184,6 +211,7 @@ func NewMultiplexTransport(
 		nodeKey:          nodeKey,
 		conns:            NewConnSet(),
 		resolver:         net.DefaultResolver,
+		authenticator:    authenticator,
 	}
 }
 
@@ -229,15 +257,14 @@ func (mt *MultiplexTransport) Dial(
 	if err := mt.filterConn(c); err != nil {
 		return nil, err
 	}
-
-	secretConn, nodeInfo, err := mt.upgrade(c, &addr)
+	authConn, nodeInfo, err := mt.upgrade(c, &addr)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg.outbound = true
 
-	p := mt.wrapPeer(secretConn, nodeInfo, cfg, &addr)
+	p := mt.wrapPeer(authConn, nodeInfo, cfg, &addr)
 
 	return p, nil
 }
@@ -327,23 +354,23 @@ func (mt *MultiplexTransport) acceptPeers() {
 			}()
 
 			var (
-				nodeInfo   NodeInfo
-				secretConn *conn.SecretConnection
-				netAddr    *NetAddress
+				nodeInfo NodeInfo
+				authConn AuthenticatedConnection
+				netAddr  *NetAddress
 			)
 
 			err := mt.filterConn(c)
 			if err == nil {
-				secretConn, nodeInfo, err = mt.upgrade(c, nil)
+				authConn, nodeInfo, err = mt.upgrade(c, nil)
 				if err == nil {
 					addr := c.RemoteAddr()
-					id := PubKeyToID(secretConn.RemotePubKey())
+					id := PubKeyToID(authConn.RemotePubKey())
 					netAddr = NewNetAddress(id, addr)
 				}
 			}
 
 			select {
-			case mt.acceptc <- accept{netAddr, secretConn, nodeInfo, err}:
+			case mt.acceptc <- accept{netAddr, authConn, nodeInfo, err}:
 				// Make the upgraded peer available.
 			case <-mt.closec:
 				// Give up if the transport was closed.
@@ -412,24 +439,42 @@ func (mt *MultiplexTransport) filterConn(c net.Conn) (err error) {
 func (mt *MultiplexTransport) upgrade(
 	c net.Conn,
 	dialedAddr *NetAddress,
-) (secretConn *conn.SecretConnection, nodeInfo NodeInfo, err error) {
+) (authConn AuthenticatedConnection, nodeInfo NodeInfo, err error) {
+	var established AuthenticatedConnection
 	defer func() {
 		if err != nil {
+			if established != nil {
+				_ = established.Close()
+			}
 			_ = mt.cleanup(c)
 		}
 	}()
 
-	secretConn, err = upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
-	if err != nil {
-		return nil, nil, ErrRejected{
-			conn:          c,
-			err:           fmt.Errorf("secret conn failed: %v", err),
-			isAuthFailure: true,
+	if mt.authenticator != nil {
+		authConn, err = mt.authenticateConn(c, dialedAddr)
+		established = authConn
+		if err != nil {
+			return nil, nil, ErrRejected{
+				conn:          c,
+				err:           err,
+				isAuthFailure: true,
+			}
 		}
+	} else {
+		secretConn, secretErr := upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
+		if secretErr != nil {
+			return nil, nil, ErrRejected{
+				conn:          c,
+				err:           fmt.Errorf("secret conn failed: %v", secretErr),
+				isAuthFailure: true,
+			}
+		}
+		authConn = secretConn
+		established = authConn
 	}
 
 	// For outgoing conns, ensure connection key matches dialed key.
-	connID := PubKeyToID(secretConn.RemotePubKey())
+	connID := PubKeyToID(authConn.RemotePubKey())
 	if dialedAddr != nil {
 		if dialedID := dialedAddr.ID; connID != dialedID {
 			return nil, nil, ErrRejected{
@@ -445,7 +490,7 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
-	nodeInfo, err = handshake(secretConn, mt.handshakeTimeout, mt.nodeInfo)
+	nodeInfo, err = handshake(authConn, mt.handshakeTimeout, mt.nodeInfo)
 	if err != nil {
 		return nil, nil, ErrRejected{
 			conn:          c,
@@ -495,7 +540,37 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
-	return secretConn, nodeInfo, nil
+	return authConn, nodeInfo, nil
+}
+
+// authenticateConn authenticates c with the injected authenticator.
+func (mt *MultiplexTransport) authenticateConn(
+	c net.Conn,
+	dialedAddr *NetAddress,
+) (AuthenticatedConnection, error) {
+	if err := c.SetDeadline(time.Now().Add(mt.handshakeTimeout)); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), mt.handshakeTimeout)
+	defer cancel()
+
+	var (
+		authConn AuthenticatedConnection
+		err      error
+	)
+	if dialedAddr != nil {
+		authConn, err = mt.authenticator.SecureOutbound(ctx, c, dialedAddr.ID)
+	} else {
+		authConn, err = mt.authenticator.SecureInbound(ctx, c)
+	}
+	if err != nil {
+		return authConn, err
+	}
+	if authConn == nil || authConn.RemotePubKey() == nil {
+		return authConn, ErrInvalidAuthenticatedConnection
+	}
+	return authConn, authConn.SetDeadline(time.Time{})
 }
 
 func (mt *MultiplexTransport) wrapPeer(
