@@ -313,6 +313,52 @@ func NewNodeWithContext(
 	logger log.Logger,
 	options ...Option,
 ) (*Node, error) {
+	return newNodeWithContext(ctx, config, privValidator,
+		nodeKey, clientCreator, genesisDocProvider, dbProvider,
+		metricsProvider, logger, nil, options...)
+}
+
+// NewNodeWithContextAndAuthenticator is NewNodeWithContext with a required
+// ConnectionAuthenticator for classic Comet transport.
+func NewNodeWithContextAndAuthenticator(
+	ctx context.Context,
+	config *cfg.Config,
+	privValidator types.PrivValidator,
+	nodeKey *p2p.NodeKey,
+	clientCreator proxy.ClientCreator,
+	genesisDocProvider GenesisDocProvider,
+	dbProvider cfg.DBProvider,
+	metricsProvider MetricsProvider,
+	logger log.Logger,
+	authenticator p2p.ConnectionAuthenticator,
+	options ...Option,
+) (*Node, error) {
+	if authenticator == nil {
+		return nil, p2p.ErrNilAuthenticator
+	}
+	if config.P2P.LibP2PEnabled() {
+		return nil, p2p.ErrUnsupportedTransport
+	}
+	return newNodeWithContext(ctx, config, privValidator,
+		nodeKey, clientCreator, genesisDocProvider, dbProvider,
+		metricsProvider, logger, authenticator, options...)
+}
+
+// newNodeWithContext constructs a Node, using authenticator for classic
+// transport when non-nil.
+func newNodeWithContext(
+	ctx context.Context,
+	config *cfg.Config,
+	privValidator types.PrivValidator,
+	nodeKey *p2p.NodeKey,
+	clientCreator proxy.ClientCreator,
+	genesisDocProvider GenesisDocProvider,
+	dbProvider cfg.DBProvider,
+	metricsProvider MetricsProvider,
+	logger log.Logger,
+	authenticator p2p.ConnectionAuthenticator,
+	options ...Option,
+) (*Node, error) {
 	blockStore, stateDB, err := initDBs(config, dbProvider)
 	if err != nil {
 		return nil, err
@@ -497,7 +543,7 @@ func NewNodeWithContext(
 
 	// Comet P2P (default)
 	if useCometNetworking {
-		cometTransport, switcher := createCometTransportWithSwitch(
+		cometTransport, switcher, err := createCometTransportWithSwitch(
 			config,
 			nodeInfo,
 			nodeKey,
@@ -509,7 +555,11 @@ func NewNodeWithContext(
 			evidenceReactor,
 			p2pMetrics,
 			p2pLogger,
+			authenticator,
 		)
+		if err != nil {
+			return nil, err
+		}
 
 		err = switcher.AddPersistentPeers(splitAndTrimEmpty(config.P2P.PersistentPeers, ",", " "))
 		if err != nil {
