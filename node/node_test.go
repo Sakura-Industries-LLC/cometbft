@@ -22,6 +22,7 @@ import (
 	"github.com/cometbft/cometbft/internal/test"
 	"github.com/cometbft/cometbft/libs/log"
 	cmtrand "github.com/cometbft/cometbft/libs/rand"
+	"github.com/cometbft/cometbft/libs/service"
 	mempl "github.com/cometbft/cometbft/mempool"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/p2p/conn"
@@ -101,6 +102,7 @@ func TestNodeStartFailureStopsConstructedServices(t *testing.T) {
 	assert.False(t, n.EventBus().IsRunning())
 	assert.False(t, n.proxyApp.IsRunning())
 	assert.False(t, n.indexerService.IsRunning())
+	require.ErrorIs(t, n.Start(), service.ErrAlreadyStopped)
 	require.NoError(t, n.Close())
 	require.NoError(t, n.Close())
 }
@@ -118,6 +120,7 @@ func TestNodeCloseBeforeStart(t *testing.T) {
 
 	require.NoError(t, n.Close())
 	require.NoError(t, n.Close())
+	require.ErrorIs(t, n.Start(), service.ErrAlreadyStopped)
 	assert.False(t, n.EventBus().IsRunning())
 	assert.False(t, n.proxyApp.IsRunning())
 }

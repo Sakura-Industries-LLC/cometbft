@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,7 +86,9 @@ type Node struct {
 	pprofSrv          *http.Server
 	// cleanupOnce closes constructed services after Stop or failed Start.
 	cleanupOnce sync.Once
-	pprofLn     net.Listener
+	// closed prevents restart after cleanup has released constructed resources.
+	closed  atomic.Bool
+	pprofLn net.Listener
 }
 
 type waitSyncReactor interface {
@@ -670,6 +673,9 @@ func newNodeWithContext(
 
 // OnStart starts the Node. It implements service.Service.
 func (n *Node) OnStart() error {
+	if n.closed.Load() {
+		return service.ErrAlreadyStopped
+	}
 	now := cmttime.Now()
 	genTime := n.genesisDoc.GenesisTime
 	if genTime.After(now) {
@@ -789,6 +795,7 @@ func (n *Node) Close() error {
 
 // cleanup closes every service owned by the node exactly once.
 func (n *Node) cleanup() {
+	n.closed.Store(true)
 	n.cleanupOnce.Do(func() {
 		n.Logger.Info("Stopping Node")
 
