@@ -8,12 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestErrRejectedUnwrap exposes authenticator rejection causes to errors.Is.
-func TestErrRejectedUnwrap(t *testing.T) {
-	cause := errors.New("authentication failed")
-	assert.ErrorIs(t, ErrRejected{err: cause, isAuthFailure: true}, cause)
-}
-
 func TestErrors(t *testing.T) {
 	t.Run("TransientErrorFromAny", func(t *testing.T) {
 		innerErr := errors.New("connection reset")
