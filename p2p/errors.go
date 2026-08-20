@@ -6,6 +6,17 @@ import (
 	"net"
 )
 
+// ErrNilAuthenticator is returned when a constructor is given a nil ConnectionAuthenticator.
+var ErrNilAuthenticator = errors.New("authenticator is nil")
+
+// ErrUnsupportedTransport is returned when an authenticator is requested for a
+// transport that does not support construction-time authentication.
+var ErrUnsupportedTransport = errors.New("authenticator is not supported for this transport")
+
+// ErrInvalidAuthenticatedConnection is returned when an authenticator
+// succeeds without providing a connection and authenticated remote public key.
+var ErrInvalidAuthenticatedConnection = errors.New("authenticator returned an invalid connection")
+
 // ErrFilterTimeout indicates that a filter operation timed out.
 type ErrFilterTimeout struct{}
 
@@ -78,6 +89,9 @@ func (e ErrRejected) Error() string {
 
 	return fmt.Sprintf("%s", e.err)
 }
+
+// Unwrap returns the underlying rejection cause.
+func (e ErrRejected) Unwrap() error { return e.err }
 
 // IsAuthFailure when Peer authentication was unsuccessful.
 func (e ErrRejected) IsAuthFailure() bool { return e.isAuthFailure }
