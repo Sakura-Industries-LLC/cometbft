@@ -225,11 +225,13 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 		panic(fmt.Sprintf("peer %v has no state", peer))
 	}
 	// Begin routines for this peer.
-	conR.startPeerRoutines(
+	if !conR.startPeerRoutines(
 		func() { conR.gossipDataRoutine(peer, peerState) },
 		func() { conR.gossipVotesRoutine(peer, peerState) },
 		func() { conR.queryMaj23Routine(peer, peerState) },
-	)
+	) {
+		return
+	}
 
 	// Send our state to peer.
 	// If we're block_syncing, broadcast a RoundStepMessage later upon SwitchToConsensus().
@@ -238,18 +240,20 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 	}
 }
 
-// startPeerRoutines starts routines unless reactor shutdown has begun.
-func (conR *Reactor) startPeerRoutines(routines ...func()) {
+// startPeerRoutines starts routines unless reactor shutdown has begun and
+// reports whether they were admitted.
+func (conR *Reactor) startPeerRoutines(routines ...func()) bool {
 	conR.peerRoutineMtx.Lock()
 	defer conR.peerRoutineMtx.Unlock()
 	if conR.peerRoutinesStopping {
-		return
+		return false
 	}
 
 	conR.peerRoutineWG.Add(len(routines))
 	for _, routine := range routines {
 		go conR.runPeerRoutine(routine)
 	}
+	return true
 }
 
 // runPeerRoutine runs and accounts for one peer gossip routine.
