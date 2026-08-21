@@ -273,14 +273,26 @@ func (conR *Reactor) stopPeerRoutines() {
 	conR.peerRoutineWG.Wait()
 }
 
-// sleepPeerRoutine waits for duration or reports reactor shutdown.
-func (conR *Reactor) sleepPeerRoutine(duration time.Duration) bool {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
+// newPeerRoutineTimer returns an expired and drained timer ready for reuse.
+func newPeerRoutineTimer() *time.Timer {
+	timer := time.NewTimer(0)
+	<-timer.C
+	return timer
+}
+
+// sleepPeerRoutine resets timer for duration or reports reactor shutdown.
+func (conR *Reactor) sleepPeerRoutine(timer *time.Timer, duration time.Duration) bool {
+	timer.Reset(duration)
 	select {
 	case <-timer.C:
 		return true
 	case <-conR.peerRoutineStop:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 		return false
 	}
 }
@@ -670,6 +682,8 @@ func (conR *Reactor) getRoundState() cstypes.RoundState {
 
 func (conR *Reactor) gossipDataRoutine(peer p2p.Peer, ps *PeerState) {
 	logger := conR.Logger.With("peer", peer)
+	timer := newPeerRoutineTimer()
+	defer timer.Stop()
 
 OUTER_LOOP:
 	for {
@@ -710,7 +724,7 @@ OUTER_LOOP:
 		}
 
 		// Nothing to do. Sleep.
-		if !conR.sleepPeerRoutine(conR.conS.config.PeerGossipSleepDuration) {
+		if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerGossipSleepDuration) {
 			return
 		}
 	}
@@ -718,6 +732,8 @@ OUTER_LOOP:
 
 func (conR *Reactor) gossipVotesRoutine(peer p2p.Peer, ps *PeerState) {
 	logger := conR.Logger.With("peer", peer)
+	timer := newPeerRoutineTimer()
+	defer timer.Stop()
 
 	// Simple hack to throttle logs upon sleep.
 	sleeping := 0
@@ -760,7 +776,7 @@ OUTER_LOOP:
 			sleeping = 1
 		}
 
-		if !conR.sleepPeerRoutine(conR.conS.config.PeerGossipSleepDuration) {
+		if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerGossipSleepDuration) {
 			return
 		}
 	}
@@ -769,6 +785,8 @@ OUTER_LOOP:
 // NOTE: `queryMaj23Routine` has a simple crude design since it only comes
 // into play for liveness when there's a signature DDoS attack happening.
 func (conR *Reactor) queryMaj23Routine(peer p2p.Peer, ps *PeerState) {
+	timer := newPeerRoutineTimer()
+	defer timer.Stop()
 OUTER_LOOP:
 	for {
 		// Manage disconnects from self or peer.
@@ -792,7 +810,7 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+					if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerQueryMaj23SleepDuration) {
 						return
 					}
 				}
@@ -814,7 +832,7 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+					if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerQueryMaj23SleepDuration) {
 						return
 					}
 				}
@@ -837,7 +855,7 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+					if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerQueryMaj23SleepDuration) {
 						return
 					}
 				}
@@ -862,14 +880,14 @@ OUTER_LOOP:
 							BlockID: commit.BlockID.ToProto(),
 						},
 					})
-					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+					if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerQueryMaj23SleepDuration) {
 						return
 					}
 				}
 			}
 		}
 
-		if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+		if !conR.sleepPeerRoutine(timer, conR.conS.config.PeerQueryMaj23SleepDuration) {
 			return
 		}
 

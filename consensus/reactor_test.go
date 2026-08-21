@@ -130,8 +130,10 @@ func TestReactorStopPeerRoutinesJoinsAdmittedRoutines(t *testing.T) {
 	interrupted := make(chan bool, 1)
 	release := make(chan struct{})
 	reactor.startPeerRoutines(func() {
+		timer := newPeerRoutineTimer()
+		defer timer.Stop()
 		close(started)
-		interrupted <- !reactor.sleepPeerRoutine(time.Hour)
+		interrupted <- !reactor.sleepPeerRoutine(timer, time.Hour)
 		<-release
 	})
 
