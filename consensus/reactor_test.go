@@ -122,6 +122,51 @@ func TestReactorBasic(t *testing.T) {
 	})
 }
 
+// TestReactorStopPeerRoutinesJoinsAdmittedRoutines proves shutdown interrupts
+// sleeping gossip work and does not return while an admitted routine is live.
+func TestReactorStopPeerRoutinesJoinsAdmittedRoutines(t *testing.T) {
+	reactor := &Reactor{peerRoutineStop: make(chan struct{})}
+	started := make(chan struct{})
+	interrupted := make(chan bool, 1)
+	release := make(chan struct{})
+	reactor.startPeerRoutines(func() {
+		close(started)
+		interrupted <- !reactor.sleepPeerRoutine(time.Hour)
+		<-release
+	})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("peer routine did not start")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		reactor.stopPeerRoutines()
+		close(stopped)
+	}()
+
+	select {
+	case wasInterrupted := <-interrupted:
+		require.True(t, wasInterrupted)
+	case <-time.After(time.Second):
+		t.Fatal("peer routine sleep was not interrupted")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("shutdown returned before the peer routine exited")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not join the peer routine")
+	}
+}
+
 // Ensure we can process blocks with evidence
 func TestReactorWithEvidence(t *testing.T) {
 	nValidators := 4

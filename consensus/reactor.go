@@ -46,6 +46,15 @@ type Reactor struct {
 	waitSync atomic.Bool
 	eventBus *types.EventBus
 
+	// peerRoutineMtx serializes peer-routine admission with shutdown.
+	peerRoutineMtx sync.Mutex
+	// peerRoutineWG joins peer gossip routines before consensus stores close.
+	peerRoutineWG sync.WaitGroup
+	// peerRoutineStop interrupts peer-routine sleeps during shutdown.
+	peerRoutineStop chan struct{}
+	// peerRoutinesStopping rejects routines once shutdown begins.
+	peerRoutinesStopping bool
+
 	rsMtx         cmtsync.RWMutex
 	rs            cstypes.RoundState // copy of consensus state
 	initialHeight atomic.Int64
@@ -60,11 +69,12 @@ type ReactorOption func(*Reactor)
 // NewReactor returns a new Reactor with the given consensusState.
 func NewReactor(consensusState *State, waitSync bool, options ...ReactorOption) *Reactor {
 	conR := &Reactor{
-		conS:          consensusState,
-		waitSync:      atomic.Bool{},
-		rs:            consensusState.getRoundState(),
-		initialHeight: atomic.Int64{},
-		Metrics:       NopMetrics(),
+		conS:            consensusState,
+		waitSync:        atomic.Bool{},
+		rs:              consensusState.getRoundState(),
+		initialHeight:   atomic.Int64{},
+		Metrics:         NopMetrics(),
+		peerRoutineStop: make(chan struct{}),
 	}
 	// Initialize consensusParams with a copy of the consensus state's params
 	params := consensusState.state.ConsensusParams
@@ -107,6 +117,7 @@ func (conR *Reactor) OnStart() error {
 // OnStop implements BaseService by unsubscribing from events and stopping
 // state.
 func (conR *Reactor) OnStop() {
+	conR.stopPeerRoutines()
 	conR.unsubscribeFromBroadcastEvents()
 	if err := conR.conS.Stop(); err != nil {
 		conR.Logger.Error("Error stopping consensus state", "err", err)
@@ -214,14 +225,59 @@ func (conR *Reactor) AddPeer(peer p2p.Peer) {
 		panic(fmt.Sprintf("peer %v has no state", peer))
 	}
 	// Begin routines for this peer.
-	go conR.gossipDataRoutine(peer, peerState)
-	go conR.gossipVotesRoutine(peer, peerState)
-	go conR.queryMaj23Routine(peer, peerState)
+	conR.startPeerRoutines(
+		func() { conR.gossipDataRoutine(peer, peerState) },
+		func() { conR.gossipVotesRoutine(peer, peerState) },
+		func() { conR.queryMaj23Routine(peer, peerState) },
+	)
 
 	// Send our state to peer.
 	// If we're block_syncing, broadcast a RoundStepMessage later upon SwitchToConsensus().
 	if !conR.WaitSync() {
 		conR.sendNewRoundStepMessage(peer)
+	}
+}
+
+// startPeerRoutines starts routines unless reactor shutdown has begun.
+func (conR *Reactor) startPeerRoutines(routines ...func()) {
+	conR.peerRoutineMtx.Lock()
+	defer conR.peerRoutineMtx.Unlock()
+	if conR.peerRoutinesStopping {
+		return
+	}
+
+	conR.peerRoutineWG.Add(len(routines))
+	for _, routine := range routines {
+		go conR.runPeerRoutine(routine)
+	}
+}
+
+// runPeerRoutine runs and accounts for one peer gossip routine.
+func (conR *Reactor) runPeerRoutine(routine func()) {
+	defer conR.peerRoutineWG.Done()
+	routine()
+}
+
+// stopPeerRoutines interrupts and joins every admitted peer gossip routine.
+func (conR *Reactor) stopPeerRoutines() {
+	conR.peerRoutineMtx.Lock()
+	if !conR.peerRoutinesStopping {
+		conR.peerRoutinesStopping = true
+		close(conR.peerRoutineStop)
+	}
+	conR.peerRoutineMtx.Unlock()
+	conR.peerRoutineWG.Wait()
+}
+
+// sleepPeerRoutine waits for duration or reports reactor shutdown.
+func (conR *Reactor) sleepPeerRoutine(duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-conR.peerRoutineStop:
+		return false
 	}
 }
 
@@ -650,7 +706,9 @@ OUTER_LOOP:
 		}
 
 		// Nothing to do. Sleep.
-		time.Sleep(conR.conS.config.PeerGossipSleepDuration)
+		if !conR.sleepPeerRoutine(conR.conS.config.PeerGossipSleepDuration) {
+			return
+		}
 	}
 }
 
@@ -698,7 +756,9 @@ OUTER_LOOP:
 			sleeping = 1
 		}
 
-		time.Sleep(conR.conS.config.PeerGossipSleepDuration)
+		if !conR.sleepPeerRoutine(conR.conS.config.PeerGossipSleepDuration) {
+			return
+		}
 	}
 }
 
@@ -728,7 +788,9 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					time.Sleep(conR.conS.config.PeerQueryMaj23SleepDuration)
+					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+						return
+					}
 				}
 			}
 		}
@@ -748,7 +810,9 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					time.Sleep(conR.conS.config.PeerQueryMaj23SleepDuration)
+					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+						return
+					}
 				}
 			}
 		}
@@ -769,7 +833,9 @@ OUTER_LOOP:
 							BlockID: maj23.ToProto(),
 						},
 					})
-					time.Sleep(conR.conS.config.PeerQueryMaj23SleepDuration)
+					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+						return
+					}
 				}
 			}
 		}
@@ -792,12 +858,16 @@ OUTER_LOOP:
 							BlockID: commit.BlockID.ToProto(),
 						},
 					})
-					time.Sleep(conR.conS.config.PeerQueryMaj23SleepDuration)
+					if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+						return
+					}
 				}
 			}
 		}
 
-		time.Sleep(conR.conS.config.PeerQueryMaj23SleepDuration)
+		if !conR.sleepPeerRoutine(conR.conS.config.PeerQueryMaj23SleepDuration) {
+			return
+		}
 
 		continue OUTER_LOOP
 	}
