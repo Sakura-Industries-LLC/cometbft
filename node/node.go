@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -82,7 +84,11 @@ type Node struct {
 	indexerService    *txindex.IndexerService
 	prometheusSrv     *http.Server
 	pprofSrv          *http.Server
-	pprofLn           net.Listener
+	// cleanupOnce closes constructed services after Stop or failed Start.
+	cleanupOnce sync.Once
+	// closed prevents restart after cleanup has released constructed resources.
+	closed  atomic.Bool
+	pprofLn net.Listener
 }
 
 type waitSyncReactor interface {
@@ -667,6 +673,9 @@ func newNodeWithContext(
 
 // OnStart starts the Node. It implements service.Service.
 func (n *Node) OnStart() error {
+	if n.closed.Load() {
+		return service.ErrAlreadyStopped
+	}
 	now := cmttime.Now()
 	genTime := n.genesisDoc.GenesisTime
 	if genTime.After(now) {
@@ -678,25 +687,11 @@ func (n *Node) OnStart() error {
 		pprofSrv, prometheusSrv *http.Server
 		pprofLn                 net.Listener
 		rpcListeners            []net.Listener
-		mpListening             bool
-		swStarted               bool
 		ok                      bool
 	)
 	defer func() {
 		if ok {
 			return
-		}
-		if swStarted {
-			if err := n.sw.Stop(); err != nil {
-				n.Logger.Error("error stopping switch during OnStart cleanup", "err", err)
-			}
-		}
-		if mpListening {
-			if mp, isMP := n.transport.(*p2p.MultiplexTransport); isMP {
-				if err := mp.Close(); err != nil {
-					n.Logger.Error("error closing transport during OnStart cleanup", "err", err)
-				}
-			}
 		}
 		for _, l := range rpcListeners {
 			if err := l.Close(); err != nil {
@@ -713,6 +708,7 @@ func (n *Node) OnStart() error {
 				n.Logger.Error("error shutting down pprof during OnStart cleanup", "err", err)
 			}
 		}
+		n.cleanup()
 	}()
 
 	// run pprof server if it is enabled
@@ -749,14 +745,12 @@ func (n *Node) OnStart() error {
 		if err := mp.Listen(*addr); err != nil {
 			return err
 		}
-		mpListening = true
 	}
 
 	// Start the switch (the P2P server).
 	if err := n.sw.Start(); err != nil {
 		return err
 	}
-	swStarted = true
 
 	// Always connect to persistent peers
 	if err := n.sw.DialPeersAsync(splitAndTrimEmpty(n.config.P2P.PersistentPeers, ",", " ")); err != nil {
@@ -783,84 +777,111 @@ func (n *Node) OnStart() error {
 // OnStop stops the Node. It implements service.Service.
 func (n *Node) OnStop() {
 	n.BaseService.OnStop()
+	n.cleanup()
+}
 
-	n.Logger.Info("Stopping Node")
+// Close stops a running node or closes resources held by a constructed or
+// failed node. Repeated calls are safe.
+func (n *Node) Close() error {
+	if n == nil {
+		return nil
+	}
+	if n.IsRunning() {
+		return n.Stop()
+	}
+	n.cleanup()
+	return nil
+}
 
-	// first stop the non-reactor services
-	if err := n.eventBus.Stop(); err != nil {
-		n.Logger.Error("Error closing eventBus", "err", err)
-	}
-	if n.indexerService != nil {
-		if err := n.indexerService.Stop(); err != nil {
-			n.Logger.Error("Error closing indexerService", "err", err)
-		}
-	}
-	// Close the priv validator before stopping the reactors: sw.Stop waits on
-	// the consensus receiveRoutine, which can be stuck retrying a gone remote
-	// signer. Closing aborts that retry loop. (RetrySignerClient is not a
-	// service.Service, so the assertion below never fires for the socket client.)
-	if c, ok := n.privValidator.(io.Closer); ok {
-		if err := c.Close(); err != nil {
-			n.Logger.Error("Error closing private validator", "err", err)
-		}
-	}
+// cleanup closes every service owned by the node exactly once.
+func (n *Node) cleanup() {
+	n.closed.Store(true)
+	n.cleanupOnce.Do(func() {
+		n.Logger.Info("Stopping Node")
 
-	// now stop the reactors
-	if err := n.sw.Stop(); err != nil {
-		n.Logger.Error("Error closing switch", "err", err)
-	}
+		// first stop the non-reactor services
+		if err := n.eventBus.Stop(); err != nil {
+			n.Logger.Error("Error closing eventBus", "err", err)
+		}
+		if n.indexerService != nil {
+			if err := n.indexerService.Stop(); err != nil {
+				n.Logger.Error("Error closing indexerService", "err", err)
+			}
+		}
+		// Close the priv validator before stopping the reactors: sw.Stop waits on
+		// the consensus receiveRoutine, which can be stuck retrying a gone remote
+		// signer. Closing aborts that retry loop. (RetrySignerClient is not a
+		// service.Service, so the assertion below never fires for the socket client.)
+		if c, ok := n.privValidator.(io.Closer); ok {
+			if err := c.Close(); err != nil {
+				n.Logger.Error("Error closing private validator", "err", err)
+			}
+		}
 
-	if mp, ok := n.transport.(*p2p.MultiplexTransport); ok {
-		if err := mp.Close(); err != nil {
-			n.Logger.Error("Error closing transport", "err", err)
+		// now stop the reactors
+		if n.sw.IsRunning() {
+			if err := n.sw.Stop(); err != nil {
+				n.Logger.Error("Error closing switch", "err", err)
+			}
 		}
-	}
+		if n.proxyApp != nil {
+			if err := n.proxyApp.Stop(); err != nil {
+				n.Logger.Error("Error closing proxy app connections", "err", err)
+			}
+		}
 
-	n.isListening = false
+		if mp, ok := n.transport.(*p2p.MultiplexTransport); ok {
+			if err := mp.Close(); err != nil {
+				n.Logger.Error("Error closing transport", "err", err)
+			}
+		}
 
-	// finally stop the listeners / external services
-	for _, l := range n.rpcListeners {
-		n.Logger.Info("Closing rpc listener", "listener", l)
-		if err := l.Close(); err != nil {
-			n.Logger.Error("Error closing listener", "listener", l, "err", err)
-		}
-	}
+		n.isListening = false
 
-	if pvsc, ok := n.privValidator.(service.Service); ok {
-		if err := pvsc.Stop(); err != nil {
-			n.Logger.Error("Error closing private validator", "err", err)
+		// finally stop the listeners / external services
+		for _, l := range n.rpcListeners {
+			n.Logger.Info("Closing rpc listener", "listener", l)
+			if err := l.Close(); err != nil {
+				n.Logger.Error("Error closing listener", "listener", l, "err", err)
+			}
 		}
-	}
 
-	if n.prometheusSrv != nil {
-		if err := n.prometheusSrv.Shutdown(context.Background()); err != nil {
-			// Error from closing listeners, or context timeout:
-			n.Logger.Error("Prometheus HTTP server Shutdown", "err", err)
+		if pvsc, ok := n.privValidator.(service.Service); ok {
+			if err := pvsc.Stop(); err != nil {
+				n.Logger.Error("Error closing private validator", "err", err)
+			}
 		}
-	}
-	if n.pprofSrv != nil {
-		if err := n.pprofSrv.Shutdown(context.Background()); err != nil {
-			n.Logger.Error("Pprof HTTP server Shutdown", "err", err)
+
+		if n.prometheusSrv != nil {
+			if err := n.prometheusSrv.Shutdown(context.Background()); err != nil {
+				// Error from closing listeners, or context timeout:
+				n.Logger.Error("Prometheus HTTP server Shutdown", "err", err)
+			}
 		}
-	}
-	if n.blockStore != nil {
-		n.Logger.Info("Closing blockstore")
-		if err := n.blockStore.Close(); err != nil {
-			n.Logger.Error("problem closing blockstore", "err", err)
+		if n.pprofSrv != nil {
+			if err := n.pprofSrv.Shutdown(context.Background()); err != nil {
+				n.Logger.Error("Pprof HTTP server Shutdown", "err", err)
+			}
 		}
-	}
-	if n.stateStore != nil {
-		n.Logger.Info("Closing statestore")
-		if err := n.stateStore.Close(); err != nil {
-			n.Logger.Error("problem closing statestore", "err", err)
+		if n.blockStore != nil {
+			n.Logger.Info("Closing blockstore")
+			if err := n.blockStore.Close(); err != nil {
+				n.Logger.Error("problem closing blockstore", "err", err)
+			}
 		}
-	}
-	if n.evidencePool != nil {
-		n.Logger.Info("Closing evidencestore")
-		if err := n.EvidencePool().Close(); err != nil {
-			n.Logger.Error("problem closing evidencestore", "err", err)
+		if n.stateStore != nil {
+			n.Logger.Info("Closing statestore")
+			if err := n.stateStore.Close(); err != nil {
+				n.Logger.Error("problem closing statestore", "err", err)
+			}
 		}
-	}
+		if n.evidencePool != nil {
+			n.Logger.Info("Closing evidencestore")
+			if err := n.EvidencePool().Close(); err != nil {
+				n.Logger.Error("problem closing evidencestore", "err", err)
+			}
+		}
+	})
 }
 
 // ConfigureRPC makes sure RPC has all the objects it needs to operate.
