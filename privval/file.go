@@ -11,6 +11,7 @@ import (
 
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
+	"github.com/cometbft/cometbft/crypto/secp256k1"
 	cmtbytes "github.com/cometbft/cometbft/libs/bytes"
 	cmtjson "github.com/cometbft/cometbft/libs/json"
 	cmtos "github.com/cometbft/cometbft/libs/os"
@@ -223,8 +224,12 @@ func loadFilePVWithError(keyFilePath, stateFilePath string, loadState bool) (*Fi
 	}
 
 	// Overwrite the public key and address from the private key.
-	pvKey.PubKey = pvKey.PrivKey.PubKey()
-	pvKey.Address = pvKey.PubKey.Address()
+	pubKey, err := derivePubKey(pvKey.PrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode private validator key %q: %w", keyFilePath, err)
+	}
+	pvKey.PubKey = pubKey
+	pvKey.Address = pubKey.Address()
 	pvKey.filePath = keyFilePath
 
 	pvState := FilePVLastSignState{}
@@ -243,6 +248,42 @@ func loadFilePVWithError(keyFilePath, stateFilePath string, loadState bool) (*Fi
 		Key:           pvKey,
 		LastSignState: pvState,
 	}, nil
+}
+
+// derivePubKey validates private key material and returns its public key,
+// converting implementation panics on malformed bytes into an error.
+func derivePubKey(privKey crypto.PrivKey) (pubKey crypto.PubKey, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			pubKey = nil
+			err = fmt.Errorf("invalid private key material: %v", recovered)
+		}
+	}()
+
+	switch key := privKey.(type) {
+	case ed25519.PrivKey:
+		if len(key) != ed25519.PrivateKeySize {
+			return nil, fmt.Errorf("invalid Ed25519 private key size: got %d, want %d", len(key), ed25519.PrivateKeySize)
+		}
+	case secp256k1.PrivKey:
+		if len(key) != secp256k1.PrivKeySize {
+			return nil, fmt.Errorf("invalid secp256k1 private key size: got %d, want %d", len(key), secp256k1.PrivKeySize)
+		}
+	}
+
+	pubKey = privKey.PubKey()
+	if pubKey == nil {
+		return nil, errors.New("private key returned a nil public key")
+	}
+	message := []byte("CometBFT private validator key validation")
+	signature, err := privKey.Sign(message)
+	if err != nil {
+		return nil, fmt.Errorf("sign validation message: %w", err)
+	}
+	if !pubKey.VerifySignature(message, signature) {
+		return nil, errors.New("private key failed self-verification")
+	}
+	return pubKey, nil
 }
 
 // LoadOrGenFilePV loads a FilePV from the given filePaths

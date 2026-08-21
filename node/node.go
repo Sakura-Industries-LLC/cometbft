@@ -819,8 +819,10 @@ func (n *Node) cleanup() {
 		}
 
 		// now stop the reactors
-		if err := n.sw.Stop(); err != nil {
-			n.Logger.Error("Error closing switch", "err", err)
+		if n.sw.IsRunning() {
+			if err := n.sw.Stop(); err != nil {
+				n.Logger.Error("Error closing switch", "err", err)
+			}
 		}
 		if n.proxyApp != nil {
 			if err := n.proxyApp.Stop(); err != nil {

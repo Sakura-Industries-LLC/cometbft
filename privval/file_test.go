@@ -50,6 +50,19 @@ func TestLoadFilePVWithError(t *testing.T) {
 // TestLoadFilePVWithErrorRejectsInvalidFiles proves missing and malformed
 // validator files return errors instead of terminating the process.
 func TestLoadFilePVWithErrorRejectsInvalidFiles(t *testing.T) {
+	writeEd25519Key := func(t *testing.T, keyFile string, privKey ed25519.PrivKey) {
+		t.Helper()
+
+		keyJSON, err := os.ReadFile(keyFile)
+		require.NoError(t, err)
+		var key FilePVKey
+		require.NoError(t, cmtjson.Unmarshal(keyJSON, &key))
+		key.PrivKey = privKey
+		keyJSON, err = cmtjson.MarshalIndent(key, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(keyFile, keyJSON, 0o600))
+	}
+
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, string, string)
@@ -66,6 +79,29 @@ func TestLoadFilePVWithErrorRejectsInvalidFiles(t *testing.T) {
 			mutate: func(t *testing.T, keyFile, _ string) {
 				t.Helper()
 				require.NoError(t, os.WriteFile(keyFile, []byte("{"), 0o600))
+			},
+		},
+		{
+			name: "short private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				writeEd25519Key(t, keyFile, ed25519.PrivKey{1})
+			},
+		},
+		{
+			name: "uninitialized private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				writeEd25519Key(t, keyFile, make(ed25519.PrivKey, ed25519.PrivateKeySize))
+			},
+		},
+		{
+			name: "inconsistent private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				privKey := ed25519.GenPrivKey()
+				privKey[len(privKey)-1] ^= 1
+				writeEd25519Key(t, keyFile, privKey)
 			},
 		},
 		{
