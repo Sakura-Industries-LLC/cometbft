@@ -66,15 +66,14 @@ func (env *Environment) Status(*rpctypes.Context) (*ctypes.ResultStatus, error) 
 			EarliestBlockTime:   time.Unix(0, earliestBlockTimeNano),
 			CatchingUp:          catchingUp,
 		},
-		ValidatorInfo: ctypes.ValidatorInfo{
-			Address:     env.PubKey.Address(),
-			PubKey:      env.PubKey,
-			VotingPower: votingPower,
-		},
+		ValidatorInfo: env.localValidatorInfo(votingPower),
 	}, nil
 }
 
 func (env *Environment) validatorAtHeight(h int64) *types.Validator {
+	if env.PubKey == nil {
+		return nil
+	}
 	valsWithH, err := env.StateStore.LoadValidators(h)
 	if err != nil {
 		return nil
@@ -82,4 +81,14 @@ func (env *Environment) validatorAtHeight(h int64) *types.Validator {
 	privValAddress := env.PubKey.Address()
 	_, val := valsWithH.GetByAddress(privValAddress)
 	return val
+}
+
+func (env *Environment) localValidatorInfo(votingPower int64) ctypes.ValidatorInfo {
+	info := ctypes.ValidatorInfo{VotingPower: votingPower}
+	if env.PubKey == nil {
+		return info
+	}
+	info.Address = env.PubKey.Address()
+	info.PubKey = env.PubKey
+	return info
 }

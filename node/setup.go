@@ -203,6 +203,10 @@ func logNodeStartupInfo(state sm.State, pubKey crypto.PubKey, logger, consensusL
 		)
 	}
 
+	if pubKey == nil {
+		consensusLogger.Info("This node is not a validator")
+		return
+	}
 	addr := pubKey.Address()
 	// Log whether this node is a validator or an observer
 	if state.Validators.HasAddress(addr) {
@@ -213,6 +217,9 @@ func logNodeStartupInfo(state sm.State, pubKey crypto.PubKey, logger, consensusL
 }
 
 func onlyValidatorIsUs(state sm.State, localAddr crypto.Address) bool {
+	if len(localAddr) == 0 {
+		return false
+	}
 	if state.Validators.Size() > 1 {
 		return false
 	}

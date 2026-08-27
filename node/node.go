@@ -19,6 +19,7 @@ import (
 	bc "github.com/cometbft/cometbft/blocksync"
 	cfg "github.com/cometbft/cometbft/config"
 	cs "github.com/cometbft/cometbft/consensus"
+	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/evidence"
 	"github.com/cometbft/cometbft/light"
 
@@ -413,11 +414,19 @@ func newNodeWithContext(
 		}
 	}
 
-	pubKey, err := privValidator.GetPubKey()
-	if err != nil {
-		return nil, fmt.Errorf("can't get pubkey: %w", err)
+	var (
+		pubKey    crypto.PubKey
+		localAddr crypto.Address
+	)
+	if privValidator != nil {
+		pubKey, err = privValidator.GetPubKey()
+		if err != nil {
+			return nil, fmt.Errorf("can't get pubkey: %w", err)
+		}
+		if pubKey != nil {
+			localAddr = pubKey.Address()
+		}
 	}
-	localAddr := pubKey.Address()
 
 	// Determine whether we should attempt state sync.
 	stateSync := config.StateSync.Enable && !onlyValidatorIsUs(state, localAddr)
@@ -886,9 +895,13 @@ func (n *Node) cleanup() {
 
 // ConfigureRPC makes sure RPC has all the objects it needs to operate.
 func (n *Node) ConfigureRPC() (*rpccore.Environment, error) {
-	pubKey, err := n.privValidator.GetPubKey()
-	if pubKey == nil || err != nil {
-		return nil, fmt.Errorf("can't get pubkey: %w", err)
+	var pubKey crypto.PubKey
+	if n.privValidator != nil {
+		var err error
+		pubKey, err = n.privValidator.GetPubKey()
+		if pubKey == nil || err != nil {
+			return nil, fmt.Errorf("can't get pubkey: %w", err)
+		}
 	}
 	rpcCoreEnv := rpccore.Environment{
 		ProxyAppQuery:   n.proxyApp.Query(),
