@@ -32,6 +32,108 @@ func TestGenLoadValidator(t *testing.T) {
 	assert.Equal(t, height, privVal.LastSignState.Height, "expected privval.LastHeight to have been saved")
 }
 
+// TestLoadFilePVWithError loads a saved validator without terminating the
+// process.
+func TestLoadFilePVWithError(t *testing.T) {
+	privVal, keyFile, stateFile := newTestFilePV(t)
+	privVal.LastSignState.Height = 100
+	privVal.Save()
+
+	loaded, err := LoadFilePVWithError(keyFile, stateFile)
+
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, privVal.GetAddress(), loaded.GetAddress())
+	assert.Equal(t, privVal.LastSignState.Height, loaded.LastSignState.Height)
+}
+
+// TestLoadFilePVWithErrorRejectsInvalidFiles proves missing and malformed
+// validator files return errors instead of terminating the process.
+func TestLoadFilePVWithErrorRejectsInvalidFiles(t *testing.T) {
+	writeEd25519Key := func(t *testing.T, keyFile string, privKey ed25519.PrivKey) {
+		t.Helper()
+
+		keyJSON, err := os.ReadFile(keyFile)
+		require.NoError(t, err)
+		var key FilePVKey
+		require.NoError(t, cmtjson.Unmarshal(keyJSON, &key))
+		key.PrivKey = privKey
+		keyJSON, err = cmtjson.MarshalIndent(key, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(keyFile, keyJSON, 0o600))
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+	}{
+		{
+			name: "missing key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				require.NoError(t, os.Remove(keyFile))
+			},
+		},
+		{
+			name: "malformed key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(keyFile, []byte("{"), 0o600))
+			},
+		},
+		{
+			name: "short private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				writeEd25519Key(t, keyFile, ed25519.PrivKey{1})
+			},
+		},
+		{
+			name: "uninitialized private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				writeEd25519Key(t, keyFile, make(ed25519.PrivKey, ed25519.PrivateKeySize))
+			},
+		},
+		{
+			name: "inconsistent private key",
+			mutate: func(t *testing.T, keyFile, _ string) {
+				t.Helper()
+				privKey := ed25519.GenPrivKey()
+				privKey[len(privKey)-1] ^= 1
+				writeEd25519Key(t, keyFile, privKey)
+			},
+		},
+		{
+			name: "missing state",
+			mutate: func(t *testing.T, _, stateFile string) {
+				t.Helper()
+				require.NoError(t, os.Remove(stateFile))
+			},
+		},
+		{
+			name: "malformed state",
+			mutate: func(t *testing.T, _, stateFile string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(stateFile, []byte("{"), 0o600))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			privVal, keyFile, stateFile := newTestFilePV(t)
+			privVal.Save()
+			tt.mutate(t, keyFile, stateFile)
+
+			loaded, err := LoadFilePVWithError(keyFile, stateFile)
+
+			require.Error(t, err)
+			assert.Nil(t, loaded)
+		})
+	}
+}
+
 func TestResetValidator(t *testing.T) {
 	privVal, _, tempStateFileName := newTestFilePV(t)
 	emptyState := FilePVLastSignState{filePath: tempStateFileName}
