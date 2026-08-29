@@ -94,11 +94,11 @@ func TestBlockResults(t *testing.T) {
 	env.Logger = log.NewTMLogger(&logBuf)
 
 	testCases := []struct {
-		height      int64
-		wantErr     bool
-		wantMissing bool
+		height       int64
+		wantErr      bool
+		wantMissing  bool
 		wantErrorLog bool
-		wantRes     *ctypes.ResultBlockResults
+		wantRes      *ctypes.ResultBlockResults
 	}{
 		{-1, true, false, false, nil},
 		{0, true, false, false, nil},
