@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	dbm "github.com/cometbft/cometbft-db"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	"github.com/cometbft/cometbft/libs/log"
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	sm "github.com/cometbft/cometbft/state"
@@ -84,19 +86,26 @@ func TestBlockResults(t *testing.T) {
 	err := env.StateStore.SaveFinalizeBlockResponse(100, results)
 	require.NoError(t, err)
 	mockstore := &mocks.BlockStore{}
-	mockstore.On("Height").Return(int64(100))
+	mockstore.On("Height").Return(int64(101))
 	mockstore.On("Base").Return(int64(1))
 	env.BlockStore = mockstore
 
+	var logBuf bytes.Buffer
+	env.Logger = log.NewTMLogger(&logBuf)
+
 	testCases := []struct {
-		height  int64
-		wantErr bool
-		wantRes *ctypes.ResultBlockResults
+		height      int64
+		wantErr     bool
+		wantMissing bool
+		wantErrorLog bool
+		wantRes     *ctypes.ResultBlockResults
 	}{
-		{-1, true, nil},
-		{0, true, nil},
-		{101, true, nil},
-		{100, false, &ctypes.ResultBlockResults{
+		{-1, true, false, false, nil},
+		{0, true, false, false, nil},
+		{102, true, false, false, nil},
+		{99, true, true, true, nil},
+		{101, true, true, false, nil},
+		{100, false, false, false, &ctypes.ResultBlockResults{
 			Height:                100,
 			TxsResults:            results.TxResults,
 			FinalizeBlockEvents:   results.Events,
@@ -107,12 +116,20 @@ func TestBlockResults(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
+		logBuf.Reset()
 		res, err := env.BlockResults(&rpctypes.Context{}, &tc.height)
-		if tc.wantErr {
+		if tc.wantMissing {
+			assert.Equal(t, sm.ErrNoABCIResponsesForHeight{Height: tc.height}, err)
+		} else if tc.wantErr {
 			assert.Error(t, err)
 		} else {
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantRes, res)
+		}
+		if tc.wantErrorLog {
+			assert.Contains(t, logBuf.String(), "failed to LoadFinalizeBlockResponse")
+		} else {
+			assert.NotContains(t, logBuf.String(), "failed to LoadFinalizeBlockResponse")
 		}
 	}
 }
