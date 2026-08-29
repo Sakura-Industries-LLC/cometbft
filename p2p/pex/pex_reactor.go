@@ -173,6 +173,7 @@ func (r *Reactor) OnStop() {
 	if err := r.book.Stop(); err != nil {
 		r.Logger.Error("Error stopping address book", "err", err)
 	}
+	r.book.Wait()
 }
 
 // GetChannels implements Reactor
