@@ -79,6 +79,9 @@ type AddrBook interface {
 
 	// Persist to disk
 	Save()
+
+	// Wait blocks until asynchronous persistence has stopped.
+	Wait()
 }
 
 var _ AddrBook = (*addrBook)(nil)
