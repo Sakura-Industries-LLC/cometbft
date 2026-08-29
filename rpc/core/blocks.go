@@ -10,6 +10,7 @@ import (
 	cmtquery "github.com/cometbft/cometbft/libs/pubsub/query"
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
+	sm "github.com/cometbft/cometbft/state"
 	blockidxnull "github.com/cometbft/cometbft/state/indexer/block/null"
 	"github.com/cometbft/cometbft/types"
 )
@@ -189,7 +190,10 @@ func (env *Environment) BlockResults(_ *rpctypes.Context, heightPtr *int64) (*ct
 
 	results, err := env.StateStore.LoadFinalizeBlockResponse(height)
 	if err != nil {
-		env.Logger.Error("failed to LoadFinalizeBlockResponse", "err", err)
+		var missing sm.ErrNoABCIResponsesForHeight
+		if !errors.As(err, &missing) || height != env.BlockStore.Height() {
+			env.Logger.Error("failed to LoadFinalizeBlockResponse", "err", err)
+		}
 		return nil, err
 	}
 
