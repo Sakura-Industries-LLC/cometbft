@@ -2464,17 +2464,18 @@ func (cs *State) signVote(
 			// handlers are inconsistent — and panic with a clear message instead
 			// of producing a silent network-level stall.
 			//
-			// Skip self-verify when the extension is empty: an absent-but-required
-			// extension is caught downstream by SignAndCheckVote and produces a
-			// recoverable error, which is the existing behavior we want to preserve.
-			if len(vote.Extension) > 0 {
-				if err := cs.blockExec.VerifyVoteExtension(context.Background(), vote); err != nil {
-					panic(fmt.Errorf(
-						"validator %X failed self-verification of its own vote extension at height %d: %w; "+
-							"application ExtendVote and VerifyVoteExtension handlers are inconsistent",
-						addr, vote.Height, err,
-					))
-				}
+			// This runs for every non-nil precommit, including one with an empty
+			// extension. A node never runs VerifyVoteExtension on its own votes
+			// when adding them, so an empty extension the application rejects
+			// would still count toward this node's own +2/3. That node could then
+			// commit a block whose precommits its peers rejected and can never
+			// commit themselves, leaving the network split one height apart.
+			if err := cs.blockExec.VerifyVoteExtension(context.Background(), vote); err != nil {
+				panic(fmt.Errorf(
+					"validator %X failed self-verification of its own vote extension at height %d: %w; "+
+						"application ExtendVote and VerifyVoteExtension handlers are inconsistent",
+					addr, vote.Height, err,
+				))
 			}
 		}
 	}
