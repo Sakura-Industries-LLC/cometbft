@@ -1870,18 +1870,18 @@ func TestVoteExtensionEnableHeight(t *testing.T) {
 			m.On("PrepareProposal", mock.Anything, mock.Anything).Return(&abci.ResponsePrepareProposal{}, nil)
 			if testCase.expectExtendCalled {
 				m.On("ExtendVote", mock.Anything, mock.Anything).Return(&abci.ResponseExtendVote{}, nil)
-			}
-			if testCase.expectVerifyCalled {
-				// One VerifyVoteExtension call per incoming precommit from the
-				// other validators. The proposer's own extension is empty in
-				// this test (see ExtendVote mock above), so the self-verify
-				// guard at signVote (#5204) is not exercised here; coverage
-				// for that path lives in TestSelfVerifyVoteExtensionRejectPanics.
+				// signVote self-verifies the proposer's own (empty) extension
+				// once; with valid incoming extensions there is one more call
+				// per precommit from the other validators.
+				calls := 1
+				if testCase.expectVerifyCalled {
+					calls += numValidators - 1
+				}
 				m.On("VerifyVoteExtension", mock.Anything, mock.Anything).
 					Return(&abci.ResponseVerifyVoteExtension{
 						Status: abci.ResponseVerifyVoteExtension_ACCEPT,
 					}, nil).
-					Times(numValidators - 1)
+					Times(calls)
 			}
 			m.On("FinalizeBlock", mock.Anything, mock.Anything).Return(&abci.ResponseFinalizeBlock{}, nil).Maybe()
 			m.On("Commit", mock.Anything, mock.Anything).Return(&abci.ResponseCommit{}, nil).Maybe()
@@ -1929,43 +1929,51 @@ func TestVoteExtensionEnableHeight(t *testing.T) {
 }
 
 // TestSelfVerifyVoteExtensionRejectPanics confirms that when ExtendVote
-// produces a non-empty extension that the same node's VerifyVoteExtension
-// rejects, signVote panics with a clear message rather than silently
-// broadcasting a precommit every peer will reject (the deadlock from #5204).
-// signVote is invoked here from the test goroutine (not via receiveRoutine),
-// so the panic propagates up instead of being swallowed by the consensus
-// loop's defer-recover.
+// produces an extension, empty or not, that the same node's
+// VerifyVoteExtension rejects, signVote panics with a clear message rather
+// than broadcasting a precommit every peer will reject (the deadlock from
+// #5204) or counting that precommit toward its own commit. signVote is
+// invoked here from the test goroutine (not via receiveRoutine), so the panic
+// propagates up instead of being swallowed by the consensus loop's
+// defer-recover.
 func TestSelfVerifyVoteExtensionRejectPanics(t *testing.T) {
-	m := abcimocks.NewApplication(t)
-	m.On("PrepareProposal", mock.Anything, mock.Anything).Return(&abci.ResponsePrepareProposal{}, nil)
-	m.On("ProcessProposal", mock.Anything, mock.Anything).
-		Return(&abci.ResponseProcessProposal{Status: abci.ResponseProcessProposal_ACCEPT}, nil).Maybe()
-	m.On("ExtendVote", mock.Anything, mock.Anything).Return(&abci.ResponseExtendVote{
-		VoteExtension: []byte("rogue-extension"),
-	}, nil)
-	m.On("VerifyVoteExtension", mock.Anything, mock.Anything).Return(&abci.ResponseVerifyVoteExtension{
-		Status: abci.ResponseVerifyVoteExtension_REJECT,
-	}, nil)
+	for name, extension := range map[string][]byte{
+		"non-empty": []byte("rogue-extension"),
+		"empty":     {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := abcimocks.NewApplication(t)
+			m.On("PrepareProposal", mock.Anything, mock.Anything).Return(&abci.ResponsePrepareProposal{}, nil)
+			m.On("ProcessProposal", mock.Anything, mock.Anything).
+				Return(&abci.ResponseProcessProposal{Status: abci.ResponseProcessProposal_ACCEPT}, nil).Maybe()
+			m.On("ExtendVote", mock.Anything, mock.Anything).Return(&abci.ResponseExtendVote{
+				VoteExtension: extension,
+			}, nil)
+			m.On("VerifyVoteExtension", mock.Anything, mock.Anything).Return(&abci.ResponseVerifyVoteExtension{
+				Status: abci.ResponseVerifyVoteExtension_REJECT,
+			}, nil)
 
-	cs1, _ := randStateWithAppWithHeight(1, m, 1)
+			cs1, _ := randStateWithAppWithHeight(1, m, 1)
 
-	block, err := cs1.createProposalBlock(context.Background())
-	require.NoError(t, err)
-	parts, err := block.MakePartSet(types.BlockPartSizeBytes)
-	require.NoError(t, err)
+			block, err := cs1.createProposalBlock(context.Background())
+			require.NoError(t, err)
+			parts, err := block.MakePartSet(types.BlockPartSizeBytes)
+			require.NoError(t, err)
 
-	defer func() {
-		r := recover()
-		require.NotNil(t, r, "signVote must panic when self-verify rejects its own extension")
-		gotErr, ok := r.(error)
-		require.Truef(t, ok, "panic value should be an error, got %T: %v", r, r)
-		require.Contains(t, gotErr.Error(), "failed self-verification of its own vote extension")
-		require.Contains(t, gotErr.Error(), "handlers are inconsistent")
-		m.AssertCalled(t, "ExtendVote", mock.Anything, mock.Anything)
-		m.AssertCalled(t, "VerifyVoteExtension", mock.Anything, mock.Anything)
-	}()
-	_, _ = cs1.signVote(cmtproto.PrecommitType, block.Hash(), parts.Header(), block)
-	t.Fatal("signVote did not panic")
+			defer func() {
+				r := recover()
+				require.NotNil(t, r, "signVote must panic when self-verify rejects its own extension")
+				gotErr, ok := r.(error)
+				require.Truef(t, ok, "panic value should be an error, got %T: %v", r, r)
+				require.Contains(t, gotErr.Error(), "failed self-verification of its own vote extension")
+				require.Contains(t, gotErr.Error(), "handlers are inconsistent")
+				m.AssertCalled(t, "ExtendVote", mock.Anything, mock.Anything)
+				m.AssertCalled(t, "VerifyVoteExtension", mock.Anything, mock.Anything)
+			}()
+			_, _ = cs1.signVote(cmtproto.PrecommitType, block.Hash(), parts.Header(), block)
+			t.Fatal("signVote did not panic")
+		})
+	}
 }
 
 // TestSelfVerifyVoteExtensionAccepts confirms that a non-empty extension

@@ -46,10 +46,11 @@
   numeric IDs in request decoding instead of silently saturating to
   `math.MinInt`, which previously made distinct large IDs collide.
   ([\#5861](https://github.com/cometbft/cometbft/pull/5861))
-- `[consensus]` a proposer now self-verifies its own vote extension before
-  broadcasting its precommit, so an application whose `ExtendVote` and
-  `VerifyVoteExtension` handlers are inconsistent halts the node with a clear
-  `CONSENSUS FAILURE` instead of stalling the whole network
+- `[consensus]` a validator now self-verifies its own vote extension, empty or
+  not, before broadcasting its precommit, so an application whose `ExtendVote`
+  and `VerifyVoteExtension` handlers are inconsistent halts the node with a
+  clear `CONSENSUS FAILURE`. Otherwise the network stalls, or the node counts an
+  empty extension its peers reject and commits a block they never can
   ([\#5204](https://github.com/cometbft/cometbft/issues/5204))
 - `[blocksync]` fix deadlock in `AddBlock` caused by holding `pool.mtx` during
   `sendError`
